@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Discourse Per-Post Trust Level Cache
 // @namespace    https://github.com/codex/discourse-level-cache/
-// @version      0.6.0
+// @version      0.6.2
 // @description  手动获取单条 Discourse 帖子作者等级，并缓存用户主页、列表页已有用户数据。
 // @author       Codex
 // @homepageURL  https://github.com/RSJWY/MyTampermonkeyScript
@@ -21,15 +21,45 @@
   const CACHE_KEY = "discourse_user_level_cache_v2";
   const HOSTS_KEY = "discourse_user_level_allowed_hosts_v1";
   const DEFAULT_ALLOWED_HOSTS = ["idcflare.com"];
+  // Cached user levels expire after 30 days.
   const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30;
   //请求间隔
   const MIN_REQUEST_GAP_MS = 1500;
   const STYLE_ID = "idf-level-style";
   const BADGE_CLASS = "idf-level-badge";
+  const LIST_BADGE_CLASS = "idf-level-list-badge";
   const FETCH_CLASS = "idf-level-fetch";
   const REFRESH_CLASS = "idf-level-refresh";
   const POST_SELECTOR = "article.topic-post, .topic-post";
   const USER_LINK_SELECTOR = "a[data-user-card], a.trigger-user-card, .names a, .username a";
+  const LIST_TOPIC_ROW_SELECTOR = [
+    ".topic-list .topic-list-item",
+    ".latest-topic-list .latest-topic-list-item",
+    ".categories-and-latest .latest-topic-list-item",
+  ].join(", ");
+  const LIST_TOPIC_TITLE_SELECTOR = [
+    ".main-link a.title",
+    ".main-link a.raw-topic-link",
+    "a.title.raw-link",
+    "a.raw-topic-link",
+    ".topic-title a",
+  ].join(", ");
+  const LIST_TOPIC_AUTHOR_SELECTORS = [
+    ".posters a.original-poster",
+    ".posters .original-poster a",
+    ".posters a[class*='original-poster']",
+    ".posters a[title*='Original Poster']",
+    ".posters a[aria-label*='Original Poster']",
+    ".posters a[data-user-card]",
+    ".posters a.trigger-user-card",
+    ".posters a[href*='/u/']",
+    ".topic-poster a[data-user-card]",
+    ".topic-poster a.trigger-user-card",
+    ".topic-poster a[href*='/u/']",
+    "a[data-user-card]",
+    "a.trigger-user-card",
+    "a[href*='/u/']",
+  ];
 
   const TRUST_LEVEL_LABELS = {
     0: "TL0",
@@ -210,6 +240,8 @@
       if (isUserPath(location.pathname)) cacheFromCurrentUserPage();
       if (!isTopicPath(location.pathname) && !isUserPath(location.pathname)) {
         cacheUsersFromCurrentPage("route-repeat");
+        injectStyle();
+        renderListUserLevels();
       }
       return;
     }
@@ -234,7 +266,9 @@
       return;
     }
 
+    injectStyle();
     cacheUsersFromCurrentPage("list-page-preloaded");
+    renderListUserLevels();
     observeListPageChanges();
   }
 
@@ -250,8 +284,12 @@
   function observeListPageChanges() {
     if (observer) observer.disconnect();
     observer = new MutationObserver(() => {
+      if (rendering) return;
       window.clearTimeout(observeListPageChanges.timer);
-      observeListPageChanges.timer = window.setTimeout(() => cacheUsersFromCurrentPage("list-page-preloaded"), 500);
+      observeListPageChanges.timer = window.setTimeout(() => {
+        cacheUsersFromCurrentPage("list-page-preloaded");
+        renderListUserLevels();
+      }, 500);
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -585,6 +623,10 @@
 
   function extractUsernameFromPost(postEl) {
     const link = postEl.querySelector(USER_LINK_SELECTOR);
+    return extractUsernameFromUserLink(link);
+  }
+
+  function extractUsernameFromUserLink(link) {
     if (!link) return "";
 
     const userCard = link.getAttribute("data-user-card");
@@ -638,6 +680,44 @@
     }
   }
 
+  function renderListUserLevels() {
+    if (rendering) return;
+    rendering = true;
+    if (observer) observer.disconnect();
+
+    try {
+      pruneCache();
+      document.querySelectorAll(`.${LIST_BADGE_CLASS}`).forEach((node) => node.remove());
+
+      for (const row of document.querySelectorAll(LIST_TOPIC_ROW_SELECTOR)) {
+        const titleLink = row.querySelector(LIST_TOPIC_TITLE_SELECTOR);
+        if (!titleLink) continue;
+
+        const authorLink = findListTopicAuthorLink(row);
+        const username = extractUsernameFromUserLink(authorLink);
+        if (!username) continue;
+
+        const item = getCached(username);
+        if (!item || item.trustLevel === null) continue;
+
+        titleLink.insertAdjacentElement("afterend", createListBadge(username, item));
+      }
+    } finally {
+      rendering = false;
+      if (observer) {
+        observer.observe(document.body, { childList: true, subtree: true });
+      }
+    }
+  }
+
+  function findListTopicAuthorLink(row) {
+    for (const selector of LIST_TOPIC_AUTHOR_SELECTORS) {
+      const link = row.querySelector(selector);
+      if (link) return link;
+    }
+    return null;
+  }
+
   function createBadge(username, item) {
     const badge = document.createElement("span");
     badge.className = BADGE_CLASS;
@@ -649,6 +729,12 @@
       item.postId ? `source post: ${item.postId}` : "",
       item.fetchedAt ? `cached: ${new Date(item.fetchedAt).toLocaleString()}` : "",
     ].filter(Boolean).join("\n");
+    return badge;
+  }
+
+  function createListBadge(username, item) {
+    const badge = createBadge(username, item);
+    badge.classList.add(LIST_BADGE_CLASS);
     return badge;
   }
 
@@ -737,6 +823,14 @@
         background: #edf5fb;
         color: #175489;
         border: 1px solid #c7dce9;
+      }
+
+      .${LIST_BADGE_CLASS} {
+        height: 16px;
+        margin-left: 4px;
+        padding: 0 4px;
+        font-size: 10px;
+        line-height: 16px;
       }
 
       .${FETCH_CLASS},
